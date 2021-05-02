@@ -10,7 +10,7 @@ sbindir := $(prefix)/sbin
 
 VER := $(shell head -n 1 NEWS | cut -d : -f 1)
 
-DEBUG :=
+DEBUG := -ggdb
 CFLAGS := -O2 -Wall $(DEBUG)
 CPPFLAGS := -DVERSION=\"$(VER)\" -DCONFIG=\"$(sysconfdir)/actkbd.conf\"
 LDLIBS := -lglfw -lGL -lm -lGLU -lGLEW
