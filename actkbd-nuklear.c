@@ -30,8 +30,54 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <string.h>
+#include <ctype.h>
 
 static char* default_config = "/etc/actkbd.conf";
+
+typedef struct {
+    char** const buffer;
+    int read;
+    int write;
+    const int maxlen;
+} circ_bbuf_t;
+
+void circ_bbuf_push (circ_bbuf_t *c, char* data) {
+    
+    c->buffer[c->write] = data;
+    c->write = (c->write + 1) % c->maxlen;
+    if (c->write == c->read)
+        c->read = (c->read + 1) % c->maxlen;
+    return;
+}
+
+char* circ_bbuf_pop (circ_bbuf_t* c) {
+    char** p = NULL;
+    if (c->read != c->write) {
+        p = c->buffer + c->read;
+        c->read = (c->read + 1) % c->maxlen;
+        return *p;
+    } else {
+        return NULL;
+    }
+}
+
+bool circ_bbuf_is_empty(circ_bbuf_t* c) {
+    return c->read == c->write;
+}
+
+bool circ_bbuf_is_full (circ_bbuf_t* c) {
+    return (c->write + 1) % c->maxlen == c->read;
+}
+
+#define CIRC_BBUF_DEF(x,y)                \
+char* x##_data_space[y];              \
+circ_bbuf_t x = {                     \
+.buffer = x##_data_space,         \
+.read = 0,                        \
+.write = 0,                       \
+.maxlen = y + 1                   \
+}
 
 struct media {
     struct nk_font *font_14;
@@ -70,13 +116,13 @@ struct combobox_dirlist {
     int selected_item;
 };
 
-void combobox_dirlist_init(struct combobox_dirlist* combobox_dirlist) {
+void combobox_dirlist_init (struct combobox_dirlist* combobox_dirlist) {
     combobox_dirlist->d = NULL;
     combobox_dirlist->itemct = 0;
     combobox_dirlist->selected_item = 0;
 }
 
-static void error_callback(int e, const char *d)
+static void error_callback (int e, const char *d)
 {printf("Error %d: %s\n", e, d);}
 
 static void ui_header (struct nk_context *ctx, struct media *media, const char *title) {
@@ -104,7 +150,7 @@ static void ui_widget_centered (struct nk_context *ctx, struct media *media, flo
 static void ui_combobox_dirlist (struct nk_context* ctx, struct media* media, struct combobox_dirlist* combobox_dirlist, char* directory, unsigned char d_type) {
     // NOTE: How could i make "items" more dynamic? it doesnt expect me to a maximum file name size does it?
     if (nk_combo_begin_label(ctx, combobox_dirlist->items[combobox_dirlist->selected_item], nk_vec2(nk_widget_width(ctx), 200))) {
-        if(combobox_dirlist->d == NULL) {
+        if (combobox_dirlist->d == NULL) {
             combobox_dirlist->itemct = 0;
             combobox_dirlist->d = opendir(directory);
             if (combobox_dirlist->d) {
@@ -130,7 +176,77 @@ static void ui_combobox_dirlist (struct nk_context* ctx, struct media* media, st
     }
 }
 
-void gui(void) {
+int check_if_number (char *str)
+{
+    int i;
+    for (i=0; str[i] != '\0'; i++)
+    {
+        if (!isdigit (str[i]))
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+#define MAX_BUF 1024
+#define PID_LIST_BLOCK 32
+
+int* pidof (char* pname) {
+    DIR* dirp;
+    FILE* fp;
+    struct dirent* entry;
+    int* pidlist, pidlist_index = 0, pidlist_realloc_count = 1;
+    char path[MAX_BUF], read_buf[MAX_BUF];
+    
+    dirp = opendir ("/proc/");
+    if (dirp == NULL) {
+        perror ("Fail");
+        return NULL;
+    }
+    
+    pidlist = malloc (sizeof (int) * PID_LIST_BLOCK);
+    if (pidlist == NULL) {
+        return NULL;
+    }
+    
+    while ((entry = readdir (dirp)) != NULL) {
+        if (check_if_number (entry->d_name)) {
+            strcpy (path, "/proc/");
+            strcat (path, entry->d_name);
+            strcat (path, "/comm");
+            
+            /* A file may not exist, it may have been removed.
+             * dut to termination of the process. Actually we need to
+             * make sure the error is actually file does not exist to
+             * be accurate.
+             */
+            fp = fopen (path, "r");
+            if (fp != NULL) {
+                fscanf (fp, "%s", read_buf);
+                if (strcmp (read_buf, pname) == 0) {
+                    /* add to list and expand list if needed */
+                    pidlist[pidlist_index++] = atoi (entry->d_name);
+                    if (pidlist_index == PID_LIST_BLOCK * pidlist_realloc_count) {
+                        pidlist_realloc_count++;
+                        pidlist = realloc (pidlist, sizeof (int) * PID_LIST_BLOCK * pidlist_realloc_count); //Error check todo
+                        if (pidlist == NULL) {
+                            return NULL;
+                        }
+                    }
+                }
+                fclose (fp);
+            }
+        }
+    }
+    
+    
+    closedir (dirp);
+    pidlist[pidlist_index] = -1; /* indicates end of list */
+    return pidlist;
+}
+
+void gui (void) {
     /* Platform */
     int win_width = 1000;
     int win_height = 700;
@@ -172,8 +288,7 @@ void gui(void) {
     actkbd_options_init(&options);
     
     char path[512];
-    FILE* error_log = fopen("/tmp/actkbd-gui.log", "w+");
-    //char* error_log_buffer = malloc(sizeof(char)*65536);
+    CIRC_BBUF_DEF(error_log_buffer, 16);
     
     while (!glfwWindowShouldClose(win))
     {
@@ -197,6 +312,7 @@ void gui(void) {
             if(options.device != combobox_dirlist.items[combobox_dirlist.selected_item] && combobox_dirlist.items[combobox_dirlist.selected_item] != NULL) {
                 options.device = combobox_dirlist.items[combobox_dirlist.selected_item];
             }
+            
             ui_header(ctx, media, "config file location (default is /etc/actkbd.conf)");
             nk_edit_string_zero_terminated(ctx, NK_EDIT_FIELD, path, sizeof(path)-1, nk_filter_default);
             if (nk_button_label (ctx, "Validate")) {
@@ -204,11 +320,10 @@ void gui(void) {
                     options.config_file = path;
                 } else {
                     options.config_file = default_config;
-                    fprintf(error_log, "File does not have read and write access\n");
-                    // TODO: add application error log
-                    //fgets(error_log_buffer, sizeof(error_log_buffer), (FILE*)error_log);
+                    circ_bbuf_push(&error_log_buffer, "File does not have read and write access!");
                 }
             }
+            
             ui_header(ctx, media, "options");
             ui_widget(ctx, media, 20);
             nk_checkbox_label(ctx, "grab device?", &options.grab);
@@ -220,12 +335,64 @@ void gui(void) {
             nk_checkbox_label(ctx, "show keypresses?", &options.show_key);
             ui_widget(ctx, media, 20);
             nk_checkbox_label(ctx, "use syslog for logging?", &options.system_log);
-            // TODO: add application error log
-            /*ui_header(ctx, media, "application log");
-            nk_edit_string_zero_terminated(ctx, NK_EDIT_READ_ONLY | NK_EDIT_SELECTABLE | NK_EDIT_MULTILINE | NK_EDIT_CLIPBOARD, error_log_buffer, sizeof(error_log_buffer)-1, nk_filter_default);*/
+            
+            if (nk_button_label (ctx, "Run actkbd!")) {
+                int* list = pidof("actkbd");
+                bool exists = false;
+                for (int i = 0; list[i] != -1; i++) {
+                    exists = true;
+                    break;
+                }
+                if (exists) {
+                    circ_bbuf_push(&error_log_buffer, "Instance of actkbd already running!");
+                } else {
+                    
+                    // TODO: Need better way of gaining access to keyboard, and making it more permanent (udev config writer probably)
+                    char cmd[65536] = "actkbd";
+                    if (options.config_file != NULL) {
+                        strcat(cmd, " -c ");
+                        strcat(cmd, options.config_file);
+                    }
+                    if (options.device != NULL) {
+                        strcat(cmd, " -d /dev/input/by-id/");
+                        strcat(cmd, options.device);
+                    }
+                    if (options.grab == nk_true) {
+                        strcat(cmd, " -g");
+                    }
+                    if (options.quiet == nk_true) {
+                        strcat(cmd, " -q");
+                    }
+                    if (options.show_exec == nk_true) {
+                        strcat(cmd, " -x");
+                    }
+                    if (options.show_key == nk_true) {
+                        strcat(cmd, " -s");
+                    }
+                    if (options.system_log == nk_true) {
+                        strcat(cmd, " -l");
+                    }
+                    
+                    strcat(cmd, " -D &");
+                    fprintf(stdout, cmd);
+                    char cmd_chmod[65535] = "sudo -A chmod 0777 /dev/input/by-id/";
+                    strcat(cmd_chmod, options.device);
+                    system(cmd_chmod);
+                    system(cmd);
+                }
+            }
+            
+            ui_header(ctx, media, "application log");
+            int read = error_log_buffer.read, write = error_log_buffer.write;
+            while (read != write) {
+                nk_label_wrap(ctx, *(error_log_buffer.buffer + read));
+                read = (read + 1) % error_log_buffer.maxlen;
+            }
+            // NOTE: should i be using this instead of nk_label_wrap?
+            //nk_edit_string(ctx, NK_EDIT_READ_ONLY | NK_EDIT_EDITOR, error_log_buffer, &error_log_size, error_log_size, nk_filter_default);
         }
-        nk_end(ctx);
         
+        nk_end(ctx);
         
         /* Draw */
         glViewport(0, 0, win_width, win_height);
@@ -233,12 +400,13 @@ void gui(void) {
         nk_glfw3_render(&glfw, NK_ANTI_ALIASING_ON, MAX_VERTEX_BUFFER, MAX_ELEMENT_BUFFER);
         glfwSwapBuffers(win);
     }
-    fclose(error_log);
+    
+    //free(error_log_buffer);
     nk_glfw3_shutdown(&glfw);
     glfwTerminate();
 }
 
 int main(int argc, char** argv) {
-	gui();
-	return 0;
+    gui();
+    return 0;
 }
