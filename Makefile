@@ -7,6 +7,7 @@
 
 prefix := /usr/local
 sbindir := $(prefix)/sbin
+sysconfdir := /etc
 
 VER := $(shell head -n 1 NEWS | cut -d : -f 1)
 

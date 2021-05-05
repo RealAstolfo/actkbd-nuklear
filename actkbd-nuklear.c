@@ -1,7 +1,7 @@
 /*
  * actkbd-nuklear - A gui for actkbd
  *
- * Copyright (c) 2021-2022 RealAstolfo@gmx.com
+ * Copyright (c) 2021-2022 Astolfo@gmx.com
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published by
@@ -97,6 +97,7 @@ struct actkbd_options {
     int show_exec;
     int show_key;
     int system_log;
+    int permanent;
 };
 
 void actkbd_options_init(struct actkbd_options* options) {
@@ -187,6 +188,47 @@ int check_if_number (char *str)
         }
     }
     return 1;
+}
+
+
+#define INITIAL_ALLOC 512
+
+
+char* read_line(FILE *fin) {
+    char *buffer;
+    char *tmp;
+    int read_chars = 0;
+    int bufsize = INITIAL_ALLOC;
+    char *line = malloc(bufsize);
+    
+    if ( !line ) {
+        return NULL;
+    }
+    
+    buffer = line;
+    
+    while ( fgets(buffer, bufsize - read_chars, fin) ) {
+        read_chars = strlen(line);
+        
+        if ( line[read_chars - 1] == '\n' ) {
+            line[read_chars - 1] = '\0';
+            return line;
+        }
+        
+        else {
+            bufsize = 2 * bufsize;
+            tmp = realloc(line, bufsize);
+            if ( tmp ) {
+                line = tmp;
+                buffer = line + read_chars;
+            }
+            else {
+                free(line);
+                return NULL;
+            }
+        }
+    }
+    return NULL;
 }
 
 #define MAX_BUF 1024
@@ -335,7 +377,8 @@ void gui (void) {
             nk_checkbox_label(ctx, "show keypresses?", &options.show_key);
             ui_widget(ctx, media, 20);
             nk_checkbox_label(ctx, "use syslog for logging?", &options.system_log);
-            
+            ui_widget(ctx, media, 20);
+            nk_checkbox_label(ctx, "make permanent?", &options.permanent);
             if (nk_button_label (ctx, "Run actkbd!")) {
                 int* list = pidof("actkbd");
                 bool exists = false;
@@ -375,10 +418,37 @@ void gui (void) {
                     
                     strcat(cmd, " -D &");
                     fprintf(stdout, cmd);
-                    char cmd_chmod[65535] = "sudo -A chmod 0777 /dev/input/by-id/";
+                    // TODO(Astolfo): pkexec doesnt exist on all linux platforms...
+                    char cmd_chmod[65535] = "pkexec chmod 0777 /dev/input/by-id/";
                     strcat(cmd_chmod, options.device);
                     system(cmd_chmod);
                     system(cmd);
+                    
+                    // TODO(Astolfo): currently, it detects if the command is just there, need to add modification of settings
+                    if (options.permanent == nk_true) {
+                        FILE* actkbd_auto;
+                        char* line;
+                        char file_name[256];
+                        strcat(strcpy(file_name, getenv("HOME")), "/.profile");
+                        actkbd_auto = fopen(file_name, "a+");
+                        if (actkbd_auto != NULL) {
+                            bool found = false;
+                            while ((line = read_line(actkbd_auto))) {
+                                if (strstr(line, options.device)){
+                                    found = true;
+                                    circ_bbuf_push(&error_log_buffer, "Config was already made permanent!");
+                                    break;
+                                }
+                                free(line);
+                            }
+                            if (!found) {
+                                fprintf(actkbd_auto, "\n%s\n%s", cmd_chmod, cmd);
+                            }
+                        } else {
+                            circ_bbuf_push(&error_log_buffer, "File has insufficient permission or does not exist!");
+                        }
+                        fclose(actkbd_auto);
+                    }
                 }
             }
             
